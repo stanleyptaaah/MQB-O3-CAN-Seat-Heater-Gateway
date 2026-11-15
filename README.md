@@ -53,3 +53,98 @@ Tento projekt vznikol v duchu slobodného zdieľania vedomostí. Komerčné vyu�
 
 ## Vylúčenie zodpovednosti (Disclaimer)
 Tento projekt slúži na vzdelávacie a hobby účely. Zásahy do elektroniky a dátovej zbernice vozidla vykonávate na vlastné riziko. Autor nenesie žiadnu zodpovednosť za prípadné škody na vozidle, elektronike alebo zdraví.
+
+# Technická architektúra systému
+
+## 1. Bloková schéma zapojenia
+
+Systém je zapojený ako **inline brána (Man-In-The-Middle)** priamo na vetve zbernice **CAN Comfort (500 kbps)** vedúcej k panelu Climatronic. Všetky ostatné uzly vozidla (Gateway, BCM, Webasto, prístrojový štít) zostávajú na primárnej strane zbernice.
+
+```mermaid
+flowchart TD
+    subgraph Vozidlo ["Palubná sieť vozidla (MQB)"]
+        GW["Gateway / BCM / ECU"]
+        WEB["Nezávislé kúrenie (Bufík)"]
+        SBR["Snímač obsadenosti & pásov"]
+        IPC["Prístrojový štít (Maxidot)"]
+    end
+
+    subgraph Prevodnik ["Custom ESP32 Inline Brána"]
+        TR1["CAN1 Transceiver\n(MCP2562 / SN65HVD230)"]
+        
+        subgraph ESP ["ESP32-WROOM (FreeRTOS)"]
+            C0["Core 0: Real-Time CAN Bridge\n(Preposielanie & MITM prepis bitov)"]
+            C1["Core 1: Aplikačná logika\n(Stav motora, Časovače, NVS, UART)"]
+            C0 <--> C1
+        end
+        
+        MCP["MCP2515 (SPI) + TJA1050\n(CAN2 Transceiver)"]
+        OPTO_BTN["Optočleny (Emulácia tlačidiel)\n3k9 / 4k7 -> GND"]
+        OPTO_LED["Vstupné deliče / Optočleny\n(Čítanie stavu LED z 3AA)"]
+        OPTO_IPC["Optočleny (Kontrolky budíkov)"]
+        UART["Service USB / UART\n(Konfigurácia časov)"]
+    end
+
+    subgraph Vyhrev ["Systém vyhrievania sedadiel"]
+        CLIMA["OEM Panel Climatronic\n(Tlačidlá & LED indikácia)"]
+        J3AA["Riadiaca jednotka\nVAG 3AA 959 775"]
+        PADS["Karbónové dečky HTS\n(2.8 Ω + 8k NTC termistor)"]
+    end
+
+    GW <-->|CAN Comfort 500k| TR1
+    WEB -->|CAN Wakeup & Status| TR1
+    SBR -->|CAN Status| TR1
+    TR1 <-->|TWAI RX/TX| C0
+    C0 <-->|SPI| MCP
+    MCP <-->|Modifikovaný CAN| CLIMA
+
+    C1 -->|Pulzy 200ms| OPTO_BTN
+    OPTO_BTN -->|Odporová matica| J3AA
+    J3AA -->|Stavové LED 0-3| OPTO_LED
+    OPTO_LED -->|Spätná väzba| C1
+
+    J3AA <-->|PWM Výkon & NTC| PADS
+    C1 -->|Stav svetiel/skla| OPTO_IPC
+    OPTO_IPC -.->|Doplnené SMD LED| IPC
+    UART <-->|115200 bps| C1
+```
+
+---
+
+## 2. Hardvérová architektúra
+
+### Oddelenie zberníc (Dual-CAN)
+Aby bolo možné selektívne modifikovať správy pre Climatronic bez ovplyvnenia zvyšku auta, komunikácia je fyzicky rozdelená na dve nezávislé zbernice s rýchlosťou **500 kbps**:
+* **CAN1 (Strana vozidla):** Využíva interný hardvérový radič **TWAI** priamo v čipe ESP32. Pre prispôsobenie napäťových úrovní slúži transceiver s 3.3V logikou (napr. `MCP2562-E/P` s pinom Vio na 3.3V alebo `SN65HVD230`).
+* **CAN2 (Strana Climatronicu):** Riešená externým radičom **MCP2515** (s 16 MHz kryštálom) pripojeným cez hardvérovú zbernicu **VSPI** a transceiverom `TJA1050`.
+
+### Rozhranie pre jednotku 3AA 959 775
+Riadiaca jednotka 3AA (pôvodne pre zadné sedadlá) je autonómna a nekomunikuje po CAN zbernici. Ovláda sa analógovo/diskrétne:
+* **Emulácia tlačidiel:** Jednotka 3AA sníma požiadavky na zmenu stupňa cez jeden spoločný vstupný pin na základe prizemnenia cez špecifický odpor (**3,9 kΩ** pre jedno sedadlo, **4,7 kΩ** pre druhé sedadlo). ESP32 spína tieto odpory proti kostre pomocou **optočlenov (PC817)** vyslaním 200 ms pulzu (koncernová logika cyklovania: `0 -> 3 -> 2 -> 1 -> 0`).
+* **Spätná väzba (Feedback):** Výstupy z jednotky 3AA určené pre napájanie indikačných LED diód v tlačidlách sú privedené (cez odporové deliče / optočleny) na digitálne vstupy ESP32. Modul tak v reálnom čase pozná skutočný stupeň vyhrievania a deteguje prípadný zásah užívateľa alebo chybový stav.
+* **Tepelná regulácia:** Jednotka 3AA riadi výkon do karbónových dečiek (2,8 Ω paralelne, cca 70 W na sedadlo) pomocou nízkofrekvenčnej **PWM modulácie** na základe spätnej väzby z integrovaného **8 kΩ NTC termistora** (zhodná krivka s originálnymi VAG dečkami).
+
+---
+
+## 3. Softvérová architektúra (FreeRTOS Dual-Core)
+
+Pre zaistenie nulového oneskorenia (latencie) pri preposielaní správ medzi vozidlom a panelom Climatronic je firmvér striktne rozdelený medzi obe výpočtové jadrá ESP32:
+
+### Core 0 – Real-Time CAN Gateway (MITM)
+* Beží s najvyššou prioritou bez akýchkoľvek blokovacích funkcií (`delay()`).
+* Okamžite preposiela všetky pakety z `CAN1 -> CAN2` a z `CAN2 -> CAN1`.
+* **MITM manipulácia:** Pri zachytení stavovej správy od BCM (obsahujúcej potvrdenie o behu výhrevu pre Climatronic) prepíše príslušné bity podľa aktuálneho stavu vyčítaného z jednotky 3AA. Panel Climatronic tak korektne rozsvieti 1 až 3 oranžové LED diódy.
+* **Priepustnosť pre nezávislé kúrenie:** Správy od bufíka (pri vypnutom zapaľovaní) prechádzajú transparentne na CAN2, čo zabezpečí prebudenie Climatronicu a spustenie ventilátora interiéru.
+
+### Core 1 – Stavový automat (State Machine) a doplnky
+* **Sledovanie mikro-stavov motora:** Vyhodnocuje otáčky (RPM), stav Svorky 15 (zapaľovanie), Svorky 50 (štartér) a príznaky systému Štart-Stop. Rozlišuje stavy `MOTOR_VYPNUTY`, `MOTOR_STARTUJE` (okamžité odpojenie záťaže), `MOTOR_BEZI` a `MOTOR_SS_STOP` (udržanie výhrevu na križovatke s ochranou proti poklesu napätia).
+* **Logika „Pamäť bufíka“:** Ak modul zaznamená beh nezávislého kúrenia pri vypnutom motore, uloží príznak do pamäte. Po následnom naštartovaní motora automaticky aktivuje výhrev vodiča (stupeň 3) a otvorí konfigurovateľné časové okno (predvolene 180 s) pre detekciu nasadnutia spolujazdca (cez CAN správu snímača obsadenosti/pásu).
+* **Časovač intenzity:** Odpočítava čas behu na maxime (predvolene 300 s) pomocou neblokujúcej funkcie `millis()` a následne jedným pulzom zníži výkon na stupeň 2.
+* **Konfigurácia NVS:** Cez sériovú linku (`Serial`) prijíma textové príkazy na zmenu časových konštánt a ukladá ich do trvalej flash pamäte (`Preferences.h`).
+
+---
+
+## 4. Energetický manažment a Deep Sleep
+
+* **Detekcia nečinnosti:** Ak na oboch CAN zberniciach ustane komunikácia na viac ako 60 sekúnd (vozidlo je zamknuté a uspané), ESP32 nakonfiguruje externé hardvérové prerušenie (`ext0`) na **RX pine CAN1 transceivera** a prejde do režimu `esp_deep_sleep_start()` (odber v rádoch mikroampérov).
+* **Okamžité prebudenie:** Akákoľvek aktivita na zbernici (odomknutie vozidla, otvorenie dverí alebo diaľkový štart bufíka) vyvolá dominantnú hranu na linke CAN, čo prebudí ESP32 v priebehu zlomku milisekundy.
