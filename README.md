@@ -62,51 +62,52 @@ Systém je zapojený ako **inline brána (Man-In-The-Middle)** priamo na vetve z
 
 ```mermaid
 flowchart TD
-    subgraph Vozidlo ["Palubná sieť vozidla (MQB)"]
+    subgraph Vozidlo["Palubna siet vozidla MQB"]
         GW["Gateway / BCM / ECU"]
-        WEB["Nezávislé kúrenie (Bufík)"]
-        SBR["Snímač obsadenosti & pásov"]
-        IPC["Prístrojový štít (Maxidot)"]
+        WEB["Nezavisle kurenie Bufik"]
+        SBR["Snimac obsadenosti a pasov"]
+        IPC["Pristrojovy stit Maxidot"]
     end
 
-    subgraph Prevodnik ["Custom ESP32 Inline Brána"]
-        TR1["CAN1 Transceiver\n(MCP2562 / SN65HVD230)"]
+    subgraph Prevodnik["Custom ESP32 Inline Brana"]
+        TR1["CAN1 Transceiver MCP2562 / SN65HVD230"]
         
-        subgraph ESP ["ESP32-WROOM (FreeRTOS)"]
-            C0["Core 0: Real-Time CAN Bridge\n(Preposielanie & MITM prepis bitov)"]
-            C1["Core 1: Aplikačná logika\n(Stav motora, Časovače, NVS, UART)"]
+        subgraph ESP["ESP32-WROOM FreeRTOS"]
+            C0["Core 0: Real-Time CAN Bridge"]
+            C1["Core 1: Logika, Stav motora, NVS, UART"]
             C0 <--> C1
         end
         
-        MCP["MCP2515 (SPI) + TJA1050\n(CAN2 Transceiver)"]
-        OPTO_BTN["Optočleny (Emulácia tlačidiel)\n3k9 / 4k7 -> GND"]
-        OPTO_LED["Vstupné deliče / Optočleny\n(Čítanie stavu LED z 3AA)"]
-        OPTO_IPC["Optočleny (Kontrolky budíkov)"]
-        UART["Service USB / UART\n(Konfigurácia časov)"]
+        MCP["MCP2515 SPI + TJA1050 CAN2"]
+        OPTO_BTN["Optocleny Emulacia tlacidiel 3k9 / 4k7"]
+        OPTO_LED["Vstupne delice / Optocleny LED z 3AA"]
+        OPTO_IPC["Optocleny Kontrolky budikov"]
+        UART["Service USB / UART 115200 bps"]
     end
 
-    subgraph Vyhrev ["Systém vyhrievania sedadiel"]
-        CLIMA["OEM Panel Climatronic\n(Tlačidlá & LED indikácia)"]
-        J3AA["Riadiaca jednotka\nVAG 3AA 959 775"]
-        PADS["Karbónové dečky HTS\n(2.8 Ω + 8k NTC termistor)"]
+    subgraph Vyhrev["System vyhrievania sedadiel"]
+        CLIMA["OEM Panel Climatronic"]
+        J3AA["Riadiaca jednotka VAG 3AA 959 775"]
+        PADS["Karbonove decky HTS 2.8 Ohm + 8k NTC"]
     end
 
     GW <-->|CAN Comfort 500k| TR1
-    WEB -->|CAN Wakeup & Status| TR1
+    WEB -->|CAN Wakeup a Status| TR1
     SBR -->|CAN Status| TR1
     TR1 <-->|TWAI RX/TX| C0
     C0 <-->|SPI| MCP
-    MCP <-->|Modifikovaný CAN| CLIMA
+    MCP <-->|Modifikovany CAN| CLIMA
 
     C1 -->|Pulzy 200ms| OPTO_BTN
-    OPTO_BTN -->|Odporová matica| J3AA
-    J3AA -->|Stavové LED 0-3| OPTO_LED
-    OPTO_LED -->|Spätná väzba| C1
+    OPTO_BTN -->|Odporova matica| J3AA
+    J3AA -->|Stavove LED 0-3| OPTO_LED
+    OPTO_LED -->|Spatna vazba| C1
 
-    J3AA <-->|PWM Výkon & NTC| PADS
-    C1 -->|Stav svetiel/skla| OPTO_IPC
-    OPTO_IPC -.->|Doplnené SMD LED| IPC
-    UART <-->|115200 bps| C1
+    J3AA <-->|PWM Vykon a NTC| PADS
+    C1 -->|Stav svetiel a skla| OPTO_IPC
+    OPTO_IPC -.->|Doplnene SMD LED| IPC
+    UART <-->|Konfiguracia| C1
+
 ```
 
 ---
